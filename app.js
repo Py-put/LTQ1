@@ -951,6 +951,8 @@ class ChatApp {
   init() {
     this.bindEvents();
     this.renderWelcome();
+    this.autosizeTextarea();
+    this.updateMetricsToggleLabel();
     this.syncSettingsToForm();
     this.refreshMetrics();
     this.refreshQueueIndicator();
@@ -977,6 +979,9 @@ class ChatApp {
         this.handleSubmit();
       }
     });
+    this.elements.textarea.addEventListener('input', () => {
+      this.autosizeTextarea();
+    });
     this.elements.cancelBtn.addEventListener('click', () => {
       this.cancelActive();
     });
@@ -992,13 +997,10 @@ class ChatApp {
     this.store.addEventListener('change', () => this.syncSettingsToForm());
     this.store.addEventListener('key-change', () => this.syncSettingsToForm());
     this.elements.metricsToggle.addEventListener('click', () => {
-      const expanded = this.elements.metricsToggle.getAttribute('aria-expanded') === 'true';
-      this.elements.metricsToggle.setAttribute('aria-expanded', String(!expanded));
-      if (expanded) {
-        this.elements.metricsPanel.classList.add('collapsed');
-      } else {
-        this.elements.metricsPanel.classList.remove('collapsed');
-      }
+      if (!this.elements.metricsPanel) return;
+      const collapsed = this.elements.metricsPanel.classList.toggle('collapsed');
+      this.elements.metricsToggle.setAttribute('aria-expanded', String(!collapsed));
+      this.updateMetricsToggleLabel();
     });
     this.elements.settingsBtn.addEventListener('click', () => this.openSettings());
     this.elements.settingsClose.addEventListener('click', () => this.closeSettings());
@@ -1090,15 +1092,26 @@ class ChatApp {
     item.className = `message ${message.role}`;
     item.dataset.messageId = message.id;
     item.setAttribute('role', 'listitem');
+    if (message.status === 'queued' || message.status === 'pending' || message.status === 'streaming') {
+      item.classList.add('is-streaming');
+    }
+    if (message.status === 'error') {
+      item.classList.add('has-error');
+    }
+    if (message.status === 'cancelled') {
+      item.classList.add('is-cancelled');
+    }
     const avatar = document.createElement('div');
     avatar.className = 'avatar';
     avatar.textContent = message.role === 'assistant' ? 'AI' : '我';
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
-    bubble.textContent = message.content;
-    const meta = document.createElement('div');
-    meta.className = 'meta';
-    this.updateMeta(meta, message);
+
+    const contentEl = document.createElement('div');
+    contentEl.className = 'content';
+    contentEl.textContent = message.content;
+    bubble.appendChild(contentEl);
+
     if (message.role === 'assistant') {
       const actions = document.createElement('div');
       actions.className = 'actions';
@@ -1121,7 +1134,12 @@ class ChatApp {
       actions.appendChild(copyBtn);
       bubble.appendChild(actions);
     }
+
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    this.updateMeta(meta, message);
     bubble.appendChild(meta);
+
     item.appendChild(avatar);
     item.appendChild(bubble);
     return item;
@@ -1142,6 +1160,9 @@ class ChatApp {
     if (message.finishReason) {
       parts.push(`finish_reason: ${message.finishReason}`);
     }
+    if (message.error) {
+      parts.push(`错误：${message.error}`);
+    }
     if (message.usage) {
       const usageParts = [];
       if (typeof message.usage.prompt_tokens === 'number') usageParts.push(`prompt ${message.usage.prompt_tokens}`);
@@ -1154,9 +1175,6 @@ class ChatApp {
     if (message.requestId) {
       parts.push(`request_id: ${message.requestId}`);
     }
-    if (message.error) {
-      parts.push(`错误：${message.error}`);
-    }
     metaEl.textContent = parts.join(' · ');
   }
 
@@ -1164,12 +1182,26 @@ class ChatApp {
     return this.elements.messageList?.querySelector(`[data-message-id="${id}"]`);
   }
 
+  autosizeTextarea() {
+    const textarea = this.elements.textarea;
+    if (!textarea) return;
+    textarea.style.height = 'auto';
+    const minHeight = 96;
+    const maxHeight = Math.max(window.innerHeight * 0.5, minHeight);
+    const next = Math.min(Math.max(textarea.scrollHeight, minHeight), maxHeight);
+    textarea.style.height = `${next}px`;
+  }
+
   handleSubmit() {
-    const content = this.elements.textarea.value.trim();
+    const textarea = this.elements.textarea;
+    if (!textarea) return;
+    const content = textarea.value.trim();
     if (!content) {
       return;
     }
-    this.elements.textarea.value = '';
+    textarea.value = '';
+    this.autosizeTextarea();
+    textarea.focus();
     const userMessage = {
       id: createId(),
       role: 'user',
@@ -1312,9 +1344,15 @@ class ChatApp {
     message.status = status;
     if (error) {
       message.error = error;
+    } else if (status !== 'error') {
+      delete message.error;
     }
     const element = this.findMessageElement(id);
     if (element) {
+      const isGenerating = status === 'queued' || status === 'pending' || status === 'streaming';
+      element.classList.toggle('is-streaming', isGenerating);
+      element.classList.toggle('has-error', status === 'error');
+      element.classList.toggle('is-cancelled', status === 'cancelled');
       const meta = element.querySelector('.meta');
       if (meta) {
         this.updateMeta(meta, message);
@@ -1329,11 +1367,12 @@ class ChatApp {
     message.content += delta;
     const element = this.findMessageElement(id);
     if (element) {
+      element.classList.add('is-streaming');
       const bubble = element.querySelector('.bubble');
       if (bubble) {
-        const textNode = bubble.firstChild;
-        if (textNode && textNode.nodeType === Node.TEXT_NODE) {
-          textNode.textContent = message.content;
+        const contentEl = bubble.querySelector('.content');
+        if (contentEl) {
+          contentEl.textContent = message.content;
         }
       }
       const meta = element.querySelector('.meta');
@@ -1394,6 +1433,8 @@ class ChatApp {
     this.scheduleAssistantReply();
     const element = this.findMessageElement(id);
     if (element) {
+      element.classList.remove('has-error');
+      element.classList.remove('is-streaming');
       const meta = element.querySelector('.meta');
       if (meta) {
         this.updateMeta(meta, message);
@@ -1405,8 +1446,22 @@ class ChatApp {
     const pending = this.queue.getPendingCount();
     if (this.elements.queueIndicator) {
       this.elements.queueIndicator.hidden = pending === 0;
+      if (pending > 0) {
+        this.elements.queueIndicator.textContent = pending === 1 ? '正在生成中…' : `队列中还有 ${pending} 个请求`;
+      } else {
+        this.elements.queueIndicator.textContent = '';
+      }
     }
     this.elements.cancelBtn.disabled = this.activeControllers.size === 0;
+  }
+
+  updateMetricsToggleLabel() {
+    const toggle = this.elements.metricsToggle;
+    const panel = this.elements.metricsPanel;
+    if (!toggle || !panel) return;
+    const collapsed = panel.classList.contains('collapsed');
+    toggle.textContent = collapsed ? '展开监控' : '折叠监控';
+    toggle.setAttribute('aria-expanded', String(!collapsed));
   }
 
   refreshMetrics() {

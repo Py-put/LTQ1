@@ -36,7 +36,7 @@
         <aside id="metrics-panel" class="metrics" aria-label="监控面板">
           <div class="metrics-header">
             <h2>监控</h2>
-            <button id="metrics-toggle" type="button" aria-expanded="true">折叠</button>
+            <button id="metrics-toggle" type="button" aria-expanded="true" aria-controls="metrics-panel">折叠监控</button>
           </div>
           <section class="metric-group" aria-live="polite">
             <h3>Tokens</h3>
@@ -68,7 +68,7 @@
         </aside>
         <main class="chat" aria-label="对话区域">
           <div id="message-list" class="messages" role="list"></div>
-          <div id="queue-indicator" class="queue-indicator" hidden>队列中…</div>
+          <div id="queue-indicator" class="queue-indicator" role="status" aria-live="polite" hidden>队列中…</div>
         </main>
       </div>
       <form id="composer" class="composer" aria-label="发送消息">
