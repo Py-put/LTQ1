@@ -10,6 +10,7 @@ const DEFAULT_SETTINGS = {
   topP: 0.95,
   maxTokens: 512,
   persistKey: false,
+  systemPrompt: '',
 };
 
 /** @typedef {{ prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; }} TokenUsage */
@@ -17,7 +18,7 @@ const DEFAULT_SETTINGS = {
 /**
  * @typedef MessageRecord
  * @property {string} id
- * @property {'user' | 'assistant'} role
+ * @property {'user' | 'assistant' | 'system'} role
  * @property {string} content
  * @property {number} createdAt
  * @property {boolean=} streaming
@@ -307,6 +308,7 @@ class Store {
           topP: Number.isFinite(parsed.topP) ? parsed.topP : DEFAULT_SETTINGS.topP,
           maxTokens: Number.isFinite(parsed.maxTokens) ? parsed.maxTokens : DEFAULT_SETTINGS.maxTokens,
           persistKey: Boolean(parsed.persistKey),
+          systemPrompt: typeof parsed.systemPrompt === 'string' ? parsed.systemPrompt : DEFAULT_SETTINGS.systemPrompt,
         };
       }
     } catch (error) {
@@ -316,7 +318,7 @@ class Store {
   }
 
   /**
-   * @returns {{ baseUrl: string; model: string; temperature: number; topP: number; maxTokens: number; persistKey: boolean; }}
+   * @returns {{ baseUrl: string; model: string; temperature: number; topP: number; maxTokens: number; persistKey: boolean; systemPrompt: string; }}
    */
   getSettings() {
     return { ...this.settings };
@@ -706,6 +708,7 @@ class UI {
     const temperatureInput = /** @type {HTMLInputElement|null} */ (document.getElementById('setting-temperature'));
     const topPInput = /** @type {HTMLInputElement|null} */ (document.getElementById('setting-top-p'));
     const maxTokensInput = /** @type {HTMLInputElement|null} */ (document.getElementById('setting-max-tokens'));
+    const systemPromptInput = /** @type {HTMLTextAreaElement|null} */ (document.getElementById('setting-system-prompt'));
     const modelsStatus = /** @type {HTMLParagraphElement|null} */ (document.getElementById('models-status'));
     const modelsRefresh = /** @type {HTMLButtonElement|null} */ (document.getElementById('models-refresh'));
     const connectionTest = /** @type {HTMLButtonElement|null} */ (document.getElementById('connection-test'));
@@ -721,7 +724,7 @@ class UI {
     if (!chatList || !queueIndicator || !toastContainer || !monitorPanel || !monitorToggle || !monitorBody ||
       !metricPrompt || !metricCompletion || !metricTotal || !metric429 || !metricRetries || !metricTtftP95 ||
       !metricTtftList || !metricFailures || !metricsExport || !settingsModal || !settingsForm || !baseUrlInput ||
-      !apiKeyInput || !persistCheckbox || !modelInput || !modelOptions || !temperatureInput || !topPInput || !maxTokensInput ||
+      !apiKeyInput || !persistCheckbox || !modelInput || !modelOptions || !temperatureInput || !topPInput || !maxTokensInput || !systemPromptInput ||
       !modelsStatus || !modelsRefresh || !connectionTest || !saveSettings || !clearKeyButton || !settingsButton || !settingsClose ||
       !clearButton || !exportButton || !sendButton || !textarea) {
       throw new Error('关键元素缺失，无法初始化 UI');
@@ -752,6 +755,7 @@ class UI {
     this.temperatureInput = temperatureInput;
     this.topPInput = topPInput;
     this.maxTokensInput = maxTokensInput;
+    this.systemPromptInput = systemPromptInput;
     this.modelsStatus = modelsStatus;
     this.modelsRefreshButton = modelsRefresh;
     this.connectionTestButton = connectionTest;
@@ -764,7 +768,7 @@ class UI {
     this.sendButton = sendButton;
     this.textarea = textarea;
 
-    /** @type {Map<string, { element: HTMLElement; contentEl: HTMLElement; metaEl: HTMLElement; data: MessageRecord; cancelButton: HTMLButtonElement|null; retryButton: HTMLButtonElement|null; copyButton: HTMLButtonElement|null; }>} */
+    /** @type {Map<string, { element: HTMLElement; contentEl: HTMLElement; metaEl: HTMLElement; data: MessageRecord; cancelButton: HTMLButtonElement|null; retryButton: HTMLButtonElement|null; requestCopyButton: HTMLButtonElement|null; contentCopyButton: HTMLButtonElement|null; }>} */
     this.messageMap = new Map();
 
     this.monitorToggle.addEventListener('click', () => {
@@ -797,7 +801,7 @@ class UI {
    * 添加消息气泡。
    * @param {MessageRecord} record
    */
-  addMessage(record) {
+  addMessage(record, position = 'end') {
     const article = document.createElement('article');
     article.className = `message message-${record.role}`;
     if (record.streaming) {
@@ -813,7 +817,11 @@ class UI {
     const meta = document.createElement('div');
     meta.className = 'message-meta';
     article.append(content, meta);
-    this.chatList.append(article);
+    if (position === 'start') {
+      this.chatList.prepend(article);
+    } else {
+      this.chatList.append(article);
+    }
     this.messageMap.set(record.id, {
       element: article,
       contentEl: content,
@@ -821,10 +829,13 @@ class UI {
       data: { ...record },
       cancelButton: null,
       retryButton: null,
-      copyButton: null,
+      requestCopyButton: null,
+      contentCopyButton: null,
     });
     this.renderMeta(record.id);
-    this.scrollToBottom();
+    if (position !== 'start') {
+      this.scrollToBottom();
+    }
   }
 
   /**
@@ -866,9 +877,13 @@ class UI {
     const { metaEl } = entry;
     const data = entry.data;
     metaEl.textContent = '';
-    if (entry.copyButton) {
-      entry.copyButton.remove();
-      entry.copyButton = null;
+    if (entry.requestCopyButton) {
+      entry.requestCopyButton.remove();
+      entry.requestCopyButton = null;
+    }
+    if (entry.contentCopyButton) {
+      entry.contentCopyButton.remove();
+      entry.contentCopyButton = null;
     }
     const badges = [];
     if (data.isAuto) {
@@ -901,6 +916,25 @@ class UI {
       span.textContent = badge;
       metaEl.append(span);
     }
+    if (data.content && data.content.length > 0) {
+      const copyContentButton = document.createElement('button');
+      copyContentButton.type = 'button';
+      copyContentButton.className = 'ghost';
+      copyContentButton.textContent = '复制内容';
+      copyContentButton.addEventListener('click', () => {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(data.content).then(() => {
+            this.showToast('消息内容已复制。', 'success', { duration: 2000 });
+          }).catch(() => {
+            this.showToast('复制失败，请手动选择文本。', 'error', { duration: 2500 });
+          });
+        } else {
+          this.showToast('此浏览器不支持剪贴板 API。', 'error', { duration: 2500 });
+        }
+      });
+      metaEl.append(copyContentButton);
+      entry.contentCopyButton = copyContentButton;
+    }
     if (data.requestId) {
       const span = document.createElement('span');
       span.textContent = `request_id: ${data.requestId}`;
@@ -908,7 +942,7 @@ class UI {
       const copyButton = document.createElement('button');
       copyButton.type = 'button';
       copyButton.className = 'ghost';
-      copyButton.textContent = '复制';
+      copyButton.textContent = '复制 request_id';
       copyButton.addEventListener('click', () => {
         if (navigator.clipboard && navigator.clipboard.writeText) {
           navigator.clipboard.writeText(data.requestId).then(() => {
@@ -921,7 +955,7 @@ class UI {
         }
       });
       metaEl.append(copyButton);
-      entry.copyButton = copyButton;
+      entry.requestCopyButton = copyButton;
     }
     if (entry.cancelButton) {
       metaEl.append(entry.cancelButton);
@@ -1003,6 +1037,15 @@ class UI {
   clearChat() {
     this.chatList.textContent = '';
     this.messageMap.clear();
+  }
+
+  removeMessage(id) {
+    const entry = this.messageMap.get(id);
+    if (!entry) {
+      return;
+    }
+    entry.element.remove();
+    this.messageMap.delete(id);
   }
 
   /**
@@ -1108,11 +1151,12 @@ class UI {
     this.maxTokensInput.value = String(settings.maxTokens);
     this.persistCheckbox.checked = Boolean(settings.persistKey);
     this.apiKeyInput.value = apiKey;
+    this.systemPromptInput.value = settings.systemPrompt || '';
   }
 
   /**
    * 获取设置表单值。
-   * @returns {{ baseUrl: string; apiKey: string; persist: boolean; model: string; temperature: number; topP: number; maxTokens: number; }}
+   * @returns {{ baseUrl: string; apiKey: string; persist: boolean; model: string; temperature: number; topP: number; maxTokens: number; systemPrompt: string; }}
    */
   readSettingsForm() {
     return {
@@ -1123,6 +1167,7 @@ class UI {
       temperature: parseNumberInput(this.temperatureInput.value, DEFAULT_SETTINGS.temperature, 0, 2),
       topP: parseNumberInput(this.topPInput.value, DEFAULT_SETTINGS.topP, 0, 1),
       maxTokens: Math.round(parseNumberInput(this.maxTokensInput.value, DEFAULT_SETTINGS.maxTokens, 16, 4096)),
+      systemPrompt: this.systemPromptInput.value.trim(),
     };
   }
 
@@ -1372,6 +1417,8 @@ class ChatApp {
     this.chatHistory = [];
     /** @type {MessageRecord[]} */
     this.messageLog = [];
+    /** @type {MessageRecord|null} */
+    this.systemMessage = null;
     /** @type {ChatJob[]} */
     this.queue = [];
     /** @type {Map<string, ChatRequest>} */
@@ -1384,6 +1431,9 @@ class ChatApp {
     const settings = this.store.getSettings();
     this.ui.fillSettingsForm(settings, this.store.getApiKey());
     this.updateMetricsDisplay();
+    if (settings.systemPrompt) {
+      this.applySystemPrompt(settings.systemPrompt, { newSession: true });
+    }
     this.showWelcomeMessage();
     this.updateQueueStatus();
     updateCspConnectSrc(settings.baseUrl);
@@ -1424,6 +1474,71 @@ class ChatApp {
     };
     this.messageLog.push(welcome);
     this.ui.addMessage(welcome);
+  }
+
+  /**
+   * 应用系统提示。
+   * @param {string} prompt
+   * @param {{ newSession?: boolean; announce?: boolean; }} [options]
+   */
+  applySystemPrompt(prompt, options) {
+    const opts = options || {};
+    const newSession = Boolean(opts.newSession);
+    const announce = Boolean(opts.announce);
+    const trimmed = (prompt || '').trim();
+    const previous = this.systemMessage ? this.systemMessage.content : '';
+
+    this.chatHistory = this.chatHistory.filter((item) => item.role !== 'system');
+    if (trimmed) {
+      this.chatHistory.unshift({ role: 'system', content: trimmed });
+    }
+
+    if (!trimmed) {
+      if (this.systemMessage) {
+        this.messageLog = this.messageLog.filter((msg) => msg.id !== this.systemMessage.id);
+        this.ui.removeMessage(this.systemMessage.id);
+        if (announce && previous) {
+          this.ui.showToast('已移除系统提示，将立即应用于后续请求。', 'info');
+        }
+        this.systemMessage = null;
+      } else if (announce) {
+        this.ui.showToast('当前未设置系统提示。', 'info');
+      }
+      return;
+    }
+
+    if (this.systemMessage) {
+      if (this.systemMessage.content !== trimmed) {
+        this.systemMessage.content = trimmed;
+        this.systemMessage.createdAt = Date.now();
+        this.systemMessage.note = '系统提示';
+        this.ui.updateMessage(this.systemMessage.id, { content: trimmed, note: '系统提示' });
+        if (announce) {
+          this.ui.showToast('系统提示已更新，将在下一次提问生效。', 'success');
+        }
+      } else if (announce) {
+        this.ui.showToast('系统提示保持不变。', 'info');
+      }
+      return;
+    }
+
+    this.messageLog = this.messageLog.filter((msg) => msg.role !== 'system');
+    const systemRecord = {
+      id: createId('system'),
+      role: 'system',
+      content: trimmed,
+      createdAt: Date.now(),
+      note: '系统提示',
+    };
+    this.systemMessage = systemRecord;
+    this.messageLog.unshift(systemRecord);
+    this.ui.addMessage(systemRecord, 'start');
+    if (announce) {
+      this.ui.showToast('系统提示已设置，将在下一次提问生效。', 'success');
+    }
+    if (!newSession) {
+      this.ui.scrollToBottom();
+    }
   }
 
   handleTextareaKey(event) {
@@ -1691,9 +1806,11 @@ class ChatApp {
       topP: values.topP,
       maxTokens: values.maxTokens,
       persistKey: values.persist,
+      systemPrompt: values.systemPrompt,
     });
     this.store.setApiKey(values.apiKey, values.persist);
     updateCspConnectSrc(values.baseUrl);
+    this.applySystemPrompt(values.systemPrompt, { announce: true });
     this.ui.showToast('设置已保存。', 'success');
     this.ui.closeSettings();
   }
@@ -1776,7 +1893,12 @@ class ChatApp {
     }
     this.chatHistory = [];
     this.messageLog = [];
+    this.systemMessage = null;
     this.ui.clearChat();
+    const prompt = this.store.getSettings().systemPrompt;
+    if (prompt) {
+      this.applySystemPrompt(prompt, { newSession: true });
+    }
     this.showWelcomeMessage();
     this.updateQueueStatus();
   }

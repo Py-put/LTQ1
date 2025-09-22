@@ -116,6 +116,11 @@
               <input id="setting-model" name="model" list="model-options" placeholder="llama3.3-70b-instruct" autocomplete="off" required>
               <datalist id="model-options"></datalist>
             </label>
+            <label class="field">
+              <span>系统提示（可选）</span>
+              <textarea id="setting-system-prompt" name="systemPrompt" rows="3" placeholder="例如：You are a helpful assistant." aria-describedby="system-prompt-hint"></textarea>
+            </label>
+            <p id="system-prompt-hint" class="hint">系统提示会作为隐藏的 system 消息发送给模型，保存后立即用于后续提问。</p>
           </fieldset>
           <fieldset>
             <legend>采样参数</legend>

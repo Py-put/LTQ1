@@ -191,6 +191,14 @@ body {
   border-top-left-radius: 0.3rem;
 }
 
+.message-system {
+  margin: 0 auto;
+  background: var(--bg-elevated);
+  border: 1px dashed var(--border);
+  color: var(--text-muted);
+  max-width: 70%;
+}
+
 .message.streaming::after {
   content: "";
   position: absolute;
@@ -424,6 +432,22 @@ legend {
   background: var(--bg);
   color: var(--text);
   font-size: 0.9rem;
+}
+
+.field textarea {
+  border-radius: 0.6rem;
+  border: 1px solid var(--border);
+  padding: 0.55rem 0.75rem;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.9rem;
+  min-height: 4rem;
+  resize: vertical;
+}
+
+.field textarea:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .field input:focus {
