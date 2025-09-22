@@ -1,0 +1,150 @@
+<!doctype html>
+<!--
+1. 将本目录三文件部署到任意静态站点或直接使用本地静态服务器即可访问。
+2. 建议运行 `python -m http.server` 后在浏览器打开 http://localhost:8000/index.html 。
+3. 默认 API Base URL 为 https://inference.do-ai.run，可在“设置 ⚙️”对话框中修改。
+4. 保存新的 Base URL 会自动刷新 CSP 的 connect-src 允许域；改回默认同理。
+5. API Key 仅保存在内存，可选“临时保存在 sessionStorage”但存在泄露风险。
+6. 请勿将密钥写入 URL（RFC 6750 提醒禁止在查询参数中传递 Bearer token）。
+7. 如需响应头 CSP，请将下方 meta 内容迁移到服务器配置，并可加 violation reporting（见 MDN）。
+8. 所有资源均为相对路径加载，部署时保持文件名与层级即可。
+9. 若使用自定义静态托管，请确保 .ts 文件的 Content-Type 为 text/javascript 以兼容模块加载。
+10. 点击“获取全部模型”即可从 Gradient Serverless Inference 拉取最新模型列表。
+-->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' https://inference.do-ai.run; img-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
+  <title>Gradient Serverless Chat</title>
+  <link rel="stylesheet" href="./styles.css" integrity="">
+</head>
+<body>
+  <div class="app" role="application">
+    <header class="top-bar" role="banner">
+      <div class="title" aria-label="产品名称">Gradient Serverless Chat</div>
+      <div class="top-actions" role="group" aria-label="全局操作">
+        <button id="settings-button" type="button" class="ghost" aria-haspopup="dialog" aria-controls="settings-modal">设置 ⚙️</button>
+        <button id="clear-button" type="button" class="ghost" aria-label="清除当前对话">清屏</button>
+        <button id="export-button" type="button" class="ghost" aria-label="导出当前对话为 JSON">导出对话（JSON）</button>
+      </div>
+    </header>
+    <div class="main-layout">
+      <aside id="monitor-panel" class="monitor" aria-live="polite" aria-label="监控面板">
+        <div class="monitor-header">
+          <h2>实时指标</h2>
+          <button id="monitor-toggle" type="button" class="ghost" aria-expanded="true" aria-controls="monitor-body">收起</button>
+        </div>
+        <div id="monitor-body" class="monitor-body">
+          <div class="metric-line" aria-live="polite">
+            <span>Prompt tokens：</span><strong id="metric-prompt">0</strong>
+          </div>
+          <div class="metric-line">
+            <span>Completion tokens：</span><strong id="metric-completion">0</strong>
+          </div>
+          <div class="metric-line">
+            <span>Total tokens：</span><strong id="metric-total">0</strong>
+          </div>
+          <div class="metric-line">
+            <span>429（5 分钟内）：</span><strong id="metric-429">0</strong>
+          </div>
+          <div class="metric-line">
+            <span>重试次数（5 分钟内）：</span><strong id="metric-retries">0</strong>
+          </div>
+          <div class="metric-block">
+            <div class="metric-line">
+              <span>TTFT p95：</span><strong id="metric-ttft-p95">--</strong>
+            </div>
+            <details id="ttft-details" open>
+              <summary>最近 20 次 TTFT（毫秒）</summary>
+              <ul id="metric-ttft-list" aria-live="polite"></ul>
+            </details>
+          </div>
+          <div class="metric-block">
+            <h3>失败类型分布</h3>
+            <ul id="metric-failures"></ul>
+          </div>
+          <div class="metric-block">
+            <button id="metrics-export" type="button" class="ghost" aria-label="导出匿名指标 NDJSON">导出近况（NDJSON）</button>
+          </div>
+        </div>
+      </aside>
+      <section class="chat-section" aria-live="polite" aria-label="对话区域">
+        <div id="queue-indicator" class="queue-indicator" role="status" aria-live="polite">空闲</div>
+        <div id="chat-list" class="chat-list" role="log" aria-live="polite"></div>
+      </section>
+    </div>
+    <div class="input-area" role="form" aria-label="发送消息">
+      <label for="chat-input" class="sr-only">输入消息</label>
+      <textarea id="chat-input" rows="3" placeholder="输入消息，Enter 发送，Shift+Enter 换行" aria-label="对话输入"></textarea>
+      <div class="input-actions">
+        <button id="send-button" type="button" class="primary" aria-label="发送当前输入">发送</button>
+      </div>
+    </div>
+  </div>
+  <div id="toast-container" class="toast-container" role="region" aria-live="polite"></div>
+  <div id="settings-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="modal-content">
+      <header class="modal-header">
+        <h2 id="settings-title">连接与模型设置</h2>
+        <button id="settings-close" type="button" class="ghost" aria-label="关闭设置">✕</button>
+      </header>
+      <div class="modal-body">
+        <form id="settings-form">
+          <fieldset>
+            <legend>接口</legend>
+            <label class="field">
+              <span>API Base URL</span>
+              <input id="setting-base-url" name="baseUrl" type="url" required inputmode="url" placeholder="https://inference.do-ai.run" autocomplete="off">
+            </label>
+            <label class="field">
+              <span>API Key</span>
+              <input id="setting-api-key" name="apiKey" type="password" autocomplete="off" placeholder="Gradient 模型访问密钥" aria-describedby="key-warning">
+            </label>
+            <label class="field checkbox">
+              <input id="setting-persist" name="persist" type="checkbox">
+              <span>临时保存在 sessionStorage</span>
+            </label>
+            <p id="key-warning" class="warning" role="alert">⚠️ 密钥默认仅存内存，保存在 sessionStorage 仍存在泄露风险，生产环境建议通过后端代理（参考 RFC 6750）。</p>
+            <div class="field inline">
+              <button id="models-refresh" type="button" class="ghost">获取全部模型</button>
+              <button id="connection-test" type="button" class="ghost">连接测试</button>
+            </div>
+            <p id="models-status" class="hint" role="status">尚未加载模型列表。</p>
+            <label class="field">
+              <span>模型选择</span>
+              <input id="setting-model" name="model" list="model-options" placeholder="llama3.3-70b-instruct" autocomplete="off" required>
+              <datalist id="model-options"></datalist>
+            </label>
+            <label class="field">
+              <span>系统提示（可选）</span>
+              <textarea id="setting-system-prompt" name="systemPrompt" rows="3" placeholder="例如：You are a helpful assistant." aria-describedby="system-prompt-hint"></textarea>
+            </label>
+            <p id="system-prompt-hint" class="hint">系统提示会作为隐藏的 system 消息发送给模型，保存后立即用于后续提问。</p>
+          </fieldset>
+          <fieldset>
+            <legend>采样参数</legend>
+            <label class="field">
+              <span>temperature（0-2）</span>
+              <input id="setting-temperature" name="temperature" type="number" min="0" max="2" step="0.01" placeholder="0.2">
+            </label>
+            <label class="field">
+              <span>top_p（0-1）</span>
+              <input id="setting-top-p" name="topP" type="number" min="0" max="1" step="0.01" placeholder="0.95">
+            </label>
+            <label class="field">
+              <span>max_tokens（16-4096）</span>
+              <input id="setting-max-tokens" name="maxTokens" type="number" min="16" max="4096" step="1" placeholder="512">
+            </label>
+          </fieldset>
+          <div class="modal-actions">
+            <button id="save-settings" type="submit" class="primary">保存设置</button>
+            <button id="clear-key" type="button" class="ghost">清除 Key</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="./app.ts"></script>
+</body>
+</html>
