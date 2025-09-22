@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<!--
+1. 将本仓库内容放到任意静态服务器或直接双击 index.html 即可本地使用。
+2. 如需修改推理服务地址，请在设置对话框更新 API Base URL。
+3. 所有脚本与样式均为本地文件，部署时保持目录结构即可。
+4. 如托管到自定义域名，请确保正确返回 text/javascript MIME 以加载 app.js（TypeScript 源码位于 app.ts）。
+5. 要改为响应头 CSP，可参考下方 meta 中的策略并在服务器设置。
+6. 可结合 Content-Security-Policy-Report-Only 观察违例并启用 reporting。
+7. 若需要允许更多上游域名，按需扩展 connect-src。
+8. 推荐使用 HTTPS 托管以保护令牌与内容。
+9. API Key 仅存于浏览器内存，谨慎开启 sessionStorage。
+10. 参考 README 了解更多注意事项。
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; connect-src 'self' https://inference.do-ai.run https:; img-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    />
+    <title>Gradient Serverless Chat</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div id="app" class="app-shell" aria-live="polite">
+      <header class="top-bar">
+        <div class="brand" aria-label="应用名称">Gradient Serverless Chat</div>
+        <div class="top-actions" role="toolbar" aria-label="主操作">
+          <button id="settings-btn" class="ghost" type="button" aria-haspopup="dialog">设置 ⚙️</button>
+          <button id="clear-btn" class="ghost" type="button">清屏</button>
+          <button id="search-btn" class="ghost" type="button" aria-haspopup="dialog">搜索</button>
+          <button id="pins-btn" class="ghost" type="button" aria-haspopup="dialog">收藏夹</button>
+          <button id="export-btn" class="ghost" type="button">导出对话（JSON）</button>
+        </div>
+      </header>
+      <div class="layout">
+        <main class="chat" aria-label="对话区域">
+          <div id="message-list" class="messages" role="list"></div>
+          <div id="queue-indicator" class="queue-indicator" role="status" aria-live="polite" hidden>队列中…</div>
+        </main>
+      </div>
+      <form id="composer" class="composer" aria-label="发送消息">
+        <label class="visually-hidden" for="input-text">输入消息</label>
+        <div class="composer-row">
+          <textarea
+            id="input-text"
+            rows="3"
+            required
+            placeholder="Shift+Enter 换行，Enter 发送"
+            aria-label="消息输入"
+          ></textarea>
+          <div class="composer-actions">
+            <button id="send-btn" type="submit" class="primary">发送</button>
+            <button id="cancel-btn" type="button" class="ghost" disabled>取消当前</button>
+          </div>
+        </div>
+        <div id="prompt-history" class="prompt-history" aria-live="polite" aria-label="最近提示" role="list"></div>
+      </form>
+    </div>
+
+    <div id="settings-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title" hidden>
+      <div class="modal-content">
+        <header class="modal-header">
+          <h2 id="settings-title">设置</h2>
+          <button id="settings-close" type="button" aria-label="关闭设置">×</button>
+        </header>
+        <form id="settings-form">
+          <fieldset>
+            <label for="setting-base-url">API Base URL</label>
+            <input id="setting-base-url" name="baseUrl" type="url" required placeholder="https://inference.do-ai.run" />
+          </fieldset>
+          <fieldset>
+            <label for="setting-api-key">API Key</label>
+            <input id="setting-api-key" name="apiKey" type="password" autocomplete="off" />
+            <label class="inline">
+              <input type="checkbox" id="setting-remember-key" /> 临时保存在 sessionStorage
+            </label>
+            <p class="warning">⚠️ 前端保存存在泄露风险，生产环境建议通过后端代理（RFC 6750）。</p>
+          </fieldset>
+          <fieldset>
+            <label for="setting-model">模型</label>
+            <select id="setting-model" name="model" aria-describedby="model-hint"></select>
+            <p id="model-hint" class="hint">若下拉为空，可手动输入模型 ID。</p>
+            <div class="settings-actions">
+              <button id="refresh-models" type="button">获取全部模型</button>
+              <button id="test-connection" type="button">连接测试</button>
+            </div>
+          </fieldset>
+          <fieldset class="grid">
+            <label for="setting-temperature">Temperature</label>
+            <input id="setting-temperature" name="temperature" type="number" step="0.01" min="0" max="2" />
+            <label for="setting-top-p">Top P</label>
+            <input id="setting-top-p" name="top_p" type="number" step="0.01" min="0" max="1" />
+            <label for="setting-max-tokens">Max Tokens</label>
+            <input id="setting-max-tokens" name="max_tokens" type="number" min="1" max="4096" />
+          </fieldset>
+          <footer class="modal-footer">
+            <button id="settings-save" type="submit" class="primary">保存设置</button>
+            <button id="settings-clear-key" type="button" class="ghost">清除 Key</button>
+          </footer>
+        </form>
+      </div>
+    </div>
+
+    <div id="search-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="search-title" hidden>
+      <div class="modal-content search-modal">
+        <header class="modal-header">
+          <h2 id="search-title">搜索消息</h2>
+          <button id="search-close" type="button" aria-label="关闭搜索">×</button>
+        </header>
+        <form id="search-form" role="search">
+          <label class="visually-hidden" for="search-input">搜索关键词</label>
+          <input id="search-input" type="search" placeholder="输入关键词..." autocomplete="off" />
+        </form>
+        <div id="search-results" class="search-results" role="list"></div>
+      </div>
+    </div>
+
+    <div id="pins-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="pins-title" hidden>
+      <div class="modal-content pins-modal">
+        <header class="modal-header">
+          <h2 id="pins-title">收藏夹</h2>
+          <button id="pins-close" type="button" aria-label="关闭收藏夹">×</button>
+        </header>
+        <div class="pins-toolbar">
+          <button id="pins-clear" type="button" class="ghost">清空全部</button>
+        </div>
+        <div id="pins-list" class="pins-list" role="list"></div>
+      </div>
+    </div>
+
+    <div id="toast-container" class="toast-container" role="status" aria-live="assertive"></div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
