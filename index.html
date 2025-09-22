@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<!-- 部署说明：
+1. 将 index.html、styles.css、app.ts 放入同一目录后，双击或用任意静态服务器（如 python -m http.server）打开。
+2. 初次使用默认 API 基址 https://inference.do-ai.run，可在设置内修改；若部署至受限网络，请相应调整 CSP。
+3. 仅需浏览器支持 ES2020 模块；无需构建或打包即可直接运行。
+4. 建议通过 HTTPS 托管，避免 API 密钥在不安全链路中泄露。
+5. 如需改为响应头 CSP，可参考 https://developer.mozilla.org/docs/Web/HTTP/CSP#the_content_security_policy_header 并结合 Content-Security-Policy-Report-Only/Report-To 启用 violation reporting。
+-->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Gradient Serverless Chat 前端，无需后端即可调用 Gradient AI Serverless Inference。">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob:; connect-src 'self' https://inference.do-ai.run https:; object-src 'none'">
+  <link rel="stylesheet" href="styles.css">
+  <title>Gradient Serverless Chat</title>
+</head>
+<body>
+  <header class="top-bar" role="banner">
+    <div class="brand" aria-label="应用名称">Gradient Serverless Chat</div>
+    <div class="top-actions">
+      <button id="settingsButton" class="ghost" type="button" aria-haspopup="dialog" aria-controls="settingsDialog">设置 ⚙️</button>
+      <button id="clearButton" class="ghost" type="button">清屏</button>
+      <button id="exportButton" class="ghost" type="button">导出对话（JSON）</button>
+    </div>
+  </header>
+  <div class="layout" role="presentation">
+    <main class="conversation" aria-live="polite">
+      <div id="messageList" class="message-list" aria-label="对话内容"></div>
+      <div class="input-area" role="form" aria-label="消息输入">
+        <label class="sr-only" for="chatInput">输入消息</label>
+        <textarea id="chatInput" rows="3" aria-label="输入发送给模型的消息" placeholder="在此输入消息，Enter 发送，Shift+Enter 换行"></textarea>
+        <div class="input-controls">
+          <span class="hint">Enter 发送 · Shift+Enter 换行</span>
+          <div class="input-buttons">
+            <button id="queueStatus" class="ghost" type="button" disabled>队列空闲</button>
+            <button id="sendButton" type="button" class="primary">发送</button>
+          </div>
+        </div>
+      </div>
+    </main>
+    <aside id="monitorPanel" class="sidebar" aria-label="监控面板" data-collapsed="false">
+      <header class="sidebar-header">
+        <h2>监控</h2>
+        <button id="toggleSidebar" type="button" aria-expanded="true" aria-controls="monitorContent">折叠</button>
+      </header>
+      <div id="monitorContent" class="sidebar-content">
+        <section>
+          <h3>Token 用量</h3>
+          <ul class="metrics-list">
+            <li>Prompt: <span id="metricPrompt">0</span></li>
+            <li>Completion: <span id="metricCompletion">0</span></li>
+            <li>Total: <span id="metricTotal">0</span></li>
+          </ul>
+        </section>
+        <section>
+          <h3>速率与重试（近 5 分钟）</h3>
+          <ul class="metrics-list">
+            <li>429 次数：<span id="metricRateLimits">0</span></li>
+            <li>重试次数：<span id="metricRetries">0</span></li>
+          </ul>
+        </section>
+        <section>
+          <h3>TTFT（最近 20 次）</h3>
+          <p>p95：<span id="metricTtftP95">-</span></p>
+          <ol id="metricTtftList" class="ttft-list" aria-live="polite"></ol>
+        </section>
+        <section>
+          <h3>失败类型</h3>
+          <ul id="metricFailures" class="metrics-list"></ul>
+        </section>
+        <section>
+          <button id="exportMetrics" type="button" class="ghost">导出近况（NDJSON）</button>
+        </section>
+      </div>
+    </aside>
+  </div>
+  <div id="settingsDialog" class="modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle" hidden>
+    <div class="modal-backdrop" data-dismiss="dialog"></div>
+    <div class="modal-content">
+      <header class="modal-header">
+        <h2 id="settingsTitle">设置</h2>
+        <button id="closeSettings" class="ghost" type="button" aria-label="关闭设置">✕</button>
+      </header>
+      <form id="settingsForm" novalidate>
+        <fieldset>
+          <legend>连接</legend>
+          <label for="baseUrlInput">API Base URL</label>
+          <input id="baseUrlInput" name="baseUrl" type="url" required placeholder="https://inference.do-ai.run">
+          <p class="hint">默认与 OpenAI 兼容：/v1/models、/v1/chat/completions。</p>
+          <label for="apiKeyInput">API Key</label>
+          <input id="apiKeyInput" name="apiKey" type="password" autocomplete="off" placeholder="填写 Gradient 模型访问密钥">
+          <p class="warning">密钥默认仅存在内存；勾选后将暂存至 sessionStorage。浏览器存储存在泄露风险，生产环境强烈建议使用后端代理。</p>
+          <label class="checkbox"><input id="rememberKey" type="checkbox"> 临时保存在 sessionStorage</label>
+          <p class="hint">遵循 RFC 6750：切勿通过 URL 传递 Bearer Token。</p>
+          <div class="field-inline">
+            <label for="modelSelect">模型选择</label>
+            <select id="modelSelect" name="model">
+              <option value="llama3.3-70b-instruct">llama3.3-70b-instruct</option>
+            </select>
+            <button id="refreshModels" type="button" class="ghost">获取全部模型</button>
+          </div>
+          <label for="manualModelInput">离线模式：手动填写模型 ID</label>
+          <input id="manualModelInput" name="manualModel" type="text" placeholder="自定义模型 ID">
+          <p id="modelStatus" class="hint">若网络不可用，可直接手动输入模型 ID。</p>
+          <div class="actions-inline">
+            <button id="testConnection" type="button" class="ghost">连接测试</button>
+          </div>
+        </fieldset>
+        <fieldset>
+          <legend>采样参数</legend>
+          <label for="temperatureInput">Temperature (0-2)</label>
+          <input id="temperatureInput" name="temperature" type="number" min="0" max="2" step="0.01" required>
+          <label for="topPInput">Top P (0-1)</label>
+          <input id="topPInput" name="top_p" type="number" min="0" max="1" step="0.01" required>
+          <label for="maxTokensInput">Max Tokens (1-4096)</label>
+          <input id="maxTokensInput" name="max_tokens" type="number" min="1" max="4096" required>
+        </fieldset>
+        <footer class="modal-footer">
+          <button id="clearKeyButton" type="button" class="ghost">清除 Key</button>
+          <div class="spacer"></div>
+          <button type="submit" class="primary">保存设置</button>
+        </footer>
+      </form>
+    </div>
+  </div>
+  <div id="toastContainer" class="toast-container" role="status" aria-live="polite"></div>
+  <script type="module" src="./app.ts"></script>
+</body>
+</html>
