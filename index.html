@@ -29,43 +29,12 @@
         <div class="top-actions" role="toolbar" aria-label="主操作">
           <button id="settings-btn" class="ghost" type="button" aria-haspopup="dialog">设置 ⚙️</button>
           <button id="clear-btn" class="ghost" type="button">清屏</button>
+          <button id="search-btn" class="ghost" type="button" aria-haspopup="dialog">搜索</button>
+          <button id="pins-btn" class="ghost" type="button" aria-haspopup="dialog">收藏夹</button>
           <button id="export-btn" class="ghost" type="button">导出对话（JSON）</button>
         </div>
       </header>
       <div class="layout">
-        <aside id="metrics-panel" class="metrics" aria-label="监控面板">
-          <div class="metrics-header">
-            <h2>监控</h2>
-            <button id="metrics-toggle" type="button" aria-expanded="true" aria-controls="metrics-panel">折叠监控</button>
-          </div>
-          <section class="metric-group" aria-live="polite">
-            <h3>Tokens</h3>
-            <dl>
-              <div><dt>Prompt</dt><dd id="metric-prompt">0</dd></div>
-              <div><dt>Completion</dt><dd id="metric-completion">0</dd></div>
-              <div><dt>Total</dt><dd id="metric-total">0</dd></div>
-            </dl>
-          </section>
-          <section class="metric-group">
-            <h3>近 5 分钟</h3>
-            <dl>
-              <div><dt>429 次数</dt><dd id="metric-429">0</dd></div>
-              <div><dt>重试次数</dt><dd id="metric-retries">0</dd></div>
-            </dl>
-          </section>
-          <section class="metric-group">
-            <h3>TTFT (ms)</h3>
-            <dl>
-              <div><dt>最近 20 次</dt><dd id="metric-ttft-list">-</dd></div>
-              <div><dt>p95</dt><dd id="metric-ttft-p95">-</dd></div>
-            </dl>
-          </section>
-          <section class="metric-group">
-            <h3>失败统计</h3>
-            <ul id="metric-failures"></ul>
-          </section>
-          <button id="export-metrics-btn" class="ghost" type="button">导出近况（NDJSON）</button>
-        </aside>
         <main class="chat" aria-label="对话区域">
           <div id="message-list" class="messages" role="list"></div>
           <div id="queue-indicator" class="queue-indicator" role="status" aria-live="polite" hidden>队列中…</div>
@@ -73,15 +42,20 @@
       </div>
       <form id="composer" class="composer" aria-label="发送消息">
         <label class="visually-hidden" for="input-text">输入消息</label>
-        <textarea
-          id="input-text"
-          rows="3"
-          required
-          placeholder="Shift+Enter 换行，Enter 发送"
-          aria-label="消息输入"
-        ></textarea>
-        <button id="send-btn" type="submit" class="primary">发送</button>
-        <button id="cancel-btn" type="button" class="ghost" disabled>取消当前</button>
+        <div class="composer-row">
+          <textarea
+            id="input-text"
+            rows="3"
+            required
+            placeholder="Shift+Enter 换行，Enter 发送"
+            aria-label="消息输入"
+          ></textarea>
+          <div class="composer-actions">
+            <button id="send-btn" type="submit" class="primary">发送</button>
+            <button id="cancel-btn" type="button" class="ghost" disabled>取消当前</button>
+          </div>
+        </div>
+        <div id="prompt-history" class="prompt-history" aria-live="polite" aria-label="最近提示" role="list"></div>
       </form>
     </div>
 
@@ -126,6 +100,33 @@
             <button id="settings-clear-key" type="button" class="ghost">清除 Key</button>
           </footer>
         </form>
+      </div>
+    </div>
+
+    <div id="search-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="search-title" hidden>
+      <div class="modal-content search-modal">
+        <header class="modal-header">
+          <h2 id="search-title">搜索消息</h2>
+          <button id="search-close" type="button" aria-label="关闭搜索">×</button>
+        </header>
+        <form id="search-form" role="search">
+          <label class="visually-hidden" for="search-input">搜索关键词</label>
+          <input id="search-input" type="search" placeholder="输入关键词..." autocomplete="off" />
+        </form>
+        <div id="search-results" class="search-results" role="list"></div>
+      </div>
+    </div>
+
+    <div id="pins-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="pins-title" hidden>
+      <div class="modal-content pins-modal">
+        <header class="modal-header">
+          <h2 id="pins-title">收藏夹</h2>
+          <button id="pins-close" type="button" aria-label="关闭收藏夹">×</button>
+        </header>
+        <div class="pins-toolbar">
+          <button id="pins-clear" type="button" class="ghost">清空全部</button>
+        </div>
+        <div id="pins-list" class="pins-list" role="list"></div>
       </div>
     </div>
 

@@ -74,6 +74,10 @@ const DEFAULT_SETTINGS = /** @type {SettingsState} */ ({
 const FIVE_MINUTES = 5 * 60 * 1000;
 const MAX_CONCURRENT = 2;
 const AUTO_CONTINUE_LIMIT = 3;
+const PIN_STORAGE_KEY = 'gradient-pins';
+const PROMPT_HISTORY_KEY = 'gradient-prompts';
+const MAX_PROMPT_HISTORY = 6;
+const MAX_PINNED = 30;
 
 /**
  * 简易 UUID 生成，优先使用 crypto.randomUUID。
@@ -84,6 +88,29 @@ function createId() {
     return crypto.randomUUID();
   }
   return 'id-' + Math.random().toString(16).slice(2) + Date.now().toString(16);
+}
+
+function escapeHtml(value) {
+  return value.replace(/[&<>"']/g, (char) => {
+    switch (char) {
+      case '&':
+        return '&amp;';
+      case '<':
+        return '&lt;';
+      case '>':
+        return '&gt;';
+      case '"':
+        return '&quot;';
+      case "'":
+        return '&#39;';
+      default:
+        return char;
+    }
+  });
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\$&');
 }
 
 /**
@@ -135,150 +162,6 @@ class Backoff {
       return null;
     }
     return this.schedule[attempt];
-  }
-}
-
-/**
- * 监控指标收集。
- */
-class Metrics {
-  constructor() {
-    this.promptTokens = 0;
-    this.completionTokens = 0;
-    this.totalTokens = 0;
-    /** @type {TimedValue[]} */
-    this.ttft = [];
-    /** @type {number[]} */
-    this.retries = [];
-    /** @type {number[]} */
-    this.rateLimitTimestamps = [];
-    /** @type {Map<string, number>} */
-    this.failures = new Map();
-    /** @type {Array<{ts:number,type:string,data:unknown}>} */
-    this.events = [];
-  }
-
-  /**
-   * @param {UsageMetrics | null | undefined} usage
-   */
-  recordUsage(usage) {
-    if (!usage) {
-      return;
-    }
-    if (typeof usage.prompt_tokens === 'number') {
-      this.promptTokens += usage.prompt_tokens;
-    }
-    if (typeof usage.completion_tokens === 'number') {
-      this.completionTokens += usage.completion_tokens;
-    }
-    if (typeof usage.total_tokens === 'number') {
-      this.totalTokens += usage.total_tokens;
-    }
-    this.events.push({ ts: Date.now(), type: 'usage', data: usage });
-  }
-
-  /**
-   * @param {number} value
-   */
-  recordTTFT(value) {
-    const entry = { ts: Date.now(), value };
-    this.ttft.push(entry);
-    if (this.ttft.length > 20) {
-      this.ttft.shift();
-    }
-    this.events.push({ ts: Date.now(), type: 'ttft', data: value });
-  }
-
-  /**
-   * @returns {number[]}
-   */
-  getTTFTList() {
-    return this.ttft.map((item) => Math.round(item.value));
-  }
-
-  /**
-   * @returns {number | null}
-   */
-  getTTFTP95() {
-    if (this.ttft.length === 0) {
-      return null;
-    }
-    const values = this.ttft.map((item) => item.value).sort((a, b) => a - b);
-    const index = Math.ceil(values.length * 0.95) - 1;
-    return Math.round(values[Math.max(0, Math.min(values.length - 1, index))]);
-  }
-
-  /**
-   * @param {number} status
-   */
-  recordRetry(status) {
-    const now = Date.now();
-    this.retries.push(now);
-    this.events.push({ ts: now, type: 'retry', data: { status } });
-    this.trimRecent();
-  }
-
-  trimRecent() {
-    const cutoff = Date.now() - FIVE_MINUTES;
-    this.retries = this.retries.filter((ts) => ts >= cutoff);
-    this.rateLimitTimestamps = this.rateLimitTimestamps.filter((ts) => ts >= cutoff);
-  }
-
-  record429() {
-    const now = Date.now();
-    this.rateLimitTimestamps.push(now);
-    this.events.push({ ts: now, type: 'rate_limit' });
-    this.trimRecent();
-  }
-
-  /**
-   * @param {string} kind
-   */
-  recordFailure(kind) {
-    const prev = this.failures.get(kind) || 0;
-    this.failures.set(kind, prev + 1);
-    this.events.push({ ts: Date.now(), type: 'failure', data: { kind } });
-  }
-
-  /**
-   * @returns {{prompt:number, completion:number, total:number}}
-   */
-  getTokenTotals() {
-    return {
-      prompt: this.promptTokens,
-      completion: this.completionTokens,
-      total: this.totalTokens,
-    };
-  }
-
-  /**
-   * @returns {number}
-   */
-  getRecent429() {
-    this.trimRecent();
-    return this.rateLimitTimestamps.length;
-  }
-
-  /**
-   * @returns {number}
-   */
-  getRecentRetries() {
-    this.trimRecent();
-    return this.retries.length;
-  }
-
-  /**
-   * @returns {Array<{kind: string; count: number}>}
-   */
-  getFailureList() {
-    return Array.from(this.failures.entries()).map(([kind, count]) => ({ kind, count }));
-  }
-
-  /**
-   * @returns {string}
-   */
-  exportNDJSON() {
-    return this.events.map((event) => JSON.stringify(event)).join('\n');
   }
 }
 
@@ -617,11 +500,9 @@ class ApiError extends Error {
 class ApiClient {
   /**
    * @param {Store} store
-   * @param {Metrics} metrics
    */
-  constructor(store, metrics) {
+  constructor(store) {
     this.store = store;
-    this.metrics = metrics;
     this.backoff = new Backoff([1000, 2000, 4000, 8000]);
   }
 
@@ -697,9 +578,6 @@ class ApiClient {
         if (error.status === 401 || error.status === 400) {
           throw error;
         }
-        if (error.status === 429) {
-          this.metrics.record429();
-        }
         if (!error.retry) {
           throw error;
         }
@@ -708,7 +586,6 @@ class ApiClient {
           throw error;
         }
         attempt += 1;
-        this.metrics.recordRetry(error.status);
         let resume = () => {};
         const resumePromise = new Promise((resolve) => {
           resume = resolve;
@@ -809,8 +686,6 @@ class ApiClient {
     let finishReason = null;
     /** @type {UsageMetrics | null} */
     let usage = null;
-    let recordedTTFT = false;
-    const startedAt = performance.now();
     const parser = new SseParser((data) => {
       if (data === '[DONE]') {
         return;
@@ -819,11 +694,6 @@ class ApiClient {
         const json = JSON.parse(data);
         const choice = Array.isArray(json.choices) ? json.choices[0] : undefined;
         if (choice && choice.delta && typeof choice.delta.content === 'string') {
-          if (!recordedTTFT) {
-            recordedTTFT = true;
-            const ttft = performance.now() - startedAt;
-            this.metrics.recordTTFT(ttft);
-          }
           text += choice.delta.content;
           options.onDelta(choice.delta.content);
         }
@@ -851,11 +721,6 @@ class ApiClient {
     parser.close();
     options.onUsage?.(usage || {});
     options.onFinish?.({ finishReason, requestId });
-    this.metrics.recordUsage(usage);
-    if (!recordedTTFT) {
-      const ttft = performance.now() - startedAt;
-      this.metrics.recordTTFT(ttft);
-    }
     return { text, finishReason, usage, requestId };
   }
 
@@ -885,7 +750,6 @@ class ApiClient {
     options.onDelta(content);
     options.onUsage?.(usage || {});
     options.onFinish?.({ finishReason, requestId });
-    this.metrics.recordUsage(usage);
     return { text: content, finishReason, usage, requestId };
   }
 }
@@ -897,19 +761,22 @@ class ChatApp {
   /**
    * @param {Store} store
    * @param {ApiClient} api
-   * @param {Metrics} metrics
    * @param {Toasts} toasts
    */
-  constructor(store, api, metrics, toasts) {
+  constructor(store, api, toasts) {
     this.store = store;
     this.api = api;
-    this.metrics = metrics;
     this.toasts = toasts;
     /** @type {ChatMessage[]} */
     this.messages = [];
     this.queue = new RequestQueue(MAX_CONCURRENT);
     this.activeControllers = new Map();
     this.continueMap = new Map();
+    this.searchMatches = [];
+    this.highlightedMessageId = null;
+    this.highlightTimer = 0;
+    this.pinnedMessages = this.loadPinnedMessages();
+    this.promptHistory = this.loadPromptHistory();
 
     this.elements = {
       messageList: document.getElementById('message-list'),
@@ -919,18 +786,19 @@ class ChatApp {
       cancelBtn: /** @type {HTMLButtonElement} */ (document.getElementById('cancel-btn')),
       clearBtn: /** @type {HTMLButtonElement} */ (document.getElementById('clear-btn')),
       exportBtn: /** @type {HTMLButtonElement} */ (document.getElementById('export-btn')),
-      exportMetricsBtn: /** @type {HTMLButtonElement} */ (document.getElementById('export-metrics-btn')),
       queueIndicator: document.getElementById('queue-indicator'),
-      metricsToggle: /** @type {HTMLButtonElement} */ (document.getElementById('metrics-toggle')),
-      metricsPanel: /** @type {HTMLElement} */ (document.getElementById('metrics-panel')),
-      metricPrompt: document.getElementById('metric-prompt'),
-      metricCompletion: document.getElementById('metric-completion'),
-      metricTotal: document.getElementById('metric-total'),
-      metricTTFTList: document.getElementById('metric-ttft-list'),
-      metricTTFTP95: document.getElementById('metric-ttft-p95'),
-      metric429: document.getElementById('metric-429'),
-      metricRetries: document.getElementById('metric-retries'),
-      metricFailures: document.getElementById('metric-failures'),
+      searchBtn: /** @type {HTMLButtonElement} */ (document.getElementById('search-btn')),
+      searchModal: /** @type {HTMLElement} */ (document.getElementById('search-modal')),
+      searchClose: /** @type {HTMLButtonElement} */ (document.getElementById('search-close')),
+      searchForm: /** @type {HTMLFormElement} */ (document.getElementById('search-form')),
+      searchInput: /** @type {HTMLInputElement} */ (document.getElementById('search-input')),
+      searchResults: /** @type {HTMLElement} */ (document.getElementById('search-results')),
+      pinsBtn: /** @type {HTMLButtonElement} */ (document.getElementById('pins-btn')),
+      pinsModal: /** @type {HTMLElement} */ (document.getElementById('pins-modal')),
+      pinsClose: /** @type {HTMLButtonElement} */ (document.getElementById('pins-close')),
+      pinsClear: /** @type {HTMLButtonElement} */ (document.getElementById('pins-clear')),
+      pinsList: /** @type {HTMLElement} */ (document.getElementById('pins-list')),
+      promptHistory: document.getElementById('prompt-history'),
       settingsBtn: /** @type {HTMLButtonElement} */ (document.getElementById('settings-btn')),
       settingsModal: /** @type {HTMLElement} */ (document.getElementById('settings-modal')),
       settingsClose: /** @type {HTMLButtonElement} */ (document.getElementById('settings-close')),
@@ -952,9 +820,10 @@ class ChatApp {
     this.bindEvents();
     this.renderWelcome();
     this.autosizeTextarea();
-    this.updateMetricsToggleLabel();
+    this.renderPromptHistory();
+    this.renderPins();
+    this.refreshPinButtons();
     this.syncSettingsToForm();
-    this.refreshMetrics();
     this.refreshQueueIndicator();
   }
 
@@ -991,16 +860,93 @@ class ChatApp {
     this.elements.exportBtn.addEventListener('click', () => {
       this.exportConversation();
     });
-    this.elements.exportMetricsBtn.addEventListener('click', () => {
-      this.exportMetrics();
-    });
     this.store.addEventListener('change', () => this.syncSettingsToForm());
     this.store.addEventListener('key-change', () => this.syncSettingsToForm());
-    this.elements.metricsToggle.addEventListener('click', () => {
-      if (!this.elements.metricsPanel) return;
-      const collapsed = this.elements.metricsPanel.classList.toggle('collapsed');
-      this.elements.metricsToggle.setAttribute('aria-expanded', String(!collapsed));
-      this.updateMetricsToggleLabel();
+    this.elements.searchBtn?.addEventListener('click', () => this.openSearch());
+    this.elements.searchClose?.addEventListener('click', () => this.closeSearch());
+    this.elements.searchModal?.addEventListener('click', (event) => {
+      if (event.target === this.elements.searchModal) {
+        this.closeSearch();
+      }
+    });
+    this.elements.searchInput?.addEventListener('input', () => {
+      const value = this.elements.searchInput?.value || '';
+      this.updateSearchResults(value);
+    });
+    this.elements.searchInput?.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        this.closeSearch();
+      }
+    });
+    this.elements.searchForm?.addEventListener('submit', (event) => {
+      event.preventDefault();
+      this.selectSearchResult(0);
+    });
+    this.elements.pinsBtn?.addEventListener('click', () => this.openPins());
+    this.elements.pinsClose?.addEventListener('click', () => this.closePins());
+    this.elements.pinsModal?.addEventListener('click', (event) => {
+      if (event.target === this.elements.pinsModal) {
+        this.closePins();
+      }
+    });
+    this.elements.pinsClear?.addEventListener('click', () => {
+      this.clearPins();
+    });
+    this.elements.pinsList?.addEventListener('click', (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const action = target.dataset.action;
+      const id = target.dataset.messageId;
+      if (!action || !id) return;
+      if (action === 'copy') {
+        const pin = this.pinnedMessages.find((item) => item.id === id);
+        if (!pin) return;
+        if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
+          this.toasts.show({ title: '当前环境不支持复制', kind: 'error' });
+          return;
+        }
+        navigator.clipboard
+          .writeText(pin.content)
+          .then(() => {
+            this.toasts.show({ title: '已复制到剪贴板', kind: 'success', duration: 2000 });
+          })
+          .catch(() => {
+            this.toasts.show({ title: '复制失败', kind: 'error' });
+          });
+      } else if (action === 'fill') {
+        const pin = this.pinnedMessages.find((item) => item.id === id);
+        if (!pin || !this.elements.textarea) return;
+        this.elements.textarea.value = pin.content;
+        this.autosizeTextarea();
+        this.elements.textarea.focus();
+      } else if (action === 'remove') {
+        this.togglePin(id);
+      } else if (action === 'locate') {
+        this.highlightMessage(id);
+        this.closePins();
+      }
+    });
+    this.elements.promptHistory?.addEventListener('click', (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const action = target.dataset.action;
+      const indexAttr = target.dataset.index;
+      if (!action || indexAttr == null) return;
+      const index = Number(indexAttr);
+      if (Number.isNaN(index)) return;
+      if (action === 'fill') {
+        const prompt = this.promptHistory[index];
+        if (prompt && this.elements.textarea) {
+          this.elements.textarea.value = prompt;
+          this.autosizeTextarea();
+          this.elements.textarea.focus();
+        }
+      } else if (action === 'remove') {
+        this.promptHistory.splice(index, 1);
+        this.savePromptHistory();
+        this.renderPromptHistory();
+      }
     });
     this.elements.settingsBtn.addEventListener('click', () => this.openSettings());
     this.elements.settingsClose.addEventListener('click', () => this.closeSettings());
@@ -1024,6 +970,406 @@ class ChatApp {
       if (this.elements.apiKeyInput) this.elements.apiKeyInput.value = '';
       this.toasts.show({ title: '密钥已清除', kind: 'info' });
     });
+    window.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        const shouldCloseSearch = this.elements.searchModal ? !this.elements.searchModal.hasAttribute('hidden') : false;
+        const shouldClosePins = this.elements.pinsModal ? !this.elements.pinsModal.hasAttribute('hidden') : false;
+        const shouldCloseSettings = this.elements.settingsModal ? !this.elements.settingsModal.hasAttribute('hidden') : false;
+        if (shouldCloseSearch) {
+          event.preventDefault();
+          this.closeSearch();
+          return;
+        }
+        if (shouldClosePins) {
+          event.preventDefault();
+          this.closePins();
+          return;
+        }
+        if (shouldCloseSettings) {
+          event.preventDefault();
+          this.closeSettings();
+        }
+      }
+    });
+    window.addEventListener('keydown', (event) => {
+      if ((event.key === 'k' || event.key === 'K') && (event.metaKey || event.ctrlKey)) {
+        const target = event.target;
+        if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) {
+          return;
+        }
+        if (target && typeof target.getAttribute === 'function' && target.getAttribute('contenteditable') === 'true') {
+          return;
+        }
+        event.preventDefault();
+        this.openSearch();
+      }
+    });
+  }
+
+  openSearch() {
+    this.elements.searchModal?.removeAttribute('hidden');
+    const input = this.elements.searchInput;
+    if (input) {
+      input.focus();
+      input.select();
+      this.updateSearchResults(input.value);
+    }
+  }
+
+  closeSearch() {
+    this.elements.searchModal?.setAttribute('hidden', '');
+    const input = this.elements.searchInput;
+    if (input) {
+      input.blur();
+    }
+    this.elements.textarea?.focus();
+  }
+
+  updateSearchResults(rawTerm) {
+    const container = this.elements.searchResults;
+    if (!container) return;
+    const term = rawTerm.trim();
+    if (term.length === 0) {
+      this.searchMatches = [];
+      this.renderSearchResults([], { rawTerm: term, normalizedTerm: '', tooShort: false });
+      return;
+    }
+    if (term.length < 2) {
+      this.searchMatches = [];
+      this.renderSearchResults([], { rawTerm: term, normalizedTerm: '', tooShort: true });
+      return;
+    }
+    const normalized = term.toLowerCase();
+    const matches = this.messages
+      .filter((message) => message.role !== 'system' && message.content && message.content.toLowerCase().includes(normalized))
+      .map((message) => ({
+        message,
+        index: message.content.toLowerCase().indexOf(normalized),
+      }))
+      .sort((a, b) => b.message.createdAt - a.message.createdAt);
+    this.searchMatches = matches.map((entry) => entry.message);
+    this.renderSearchResults(matches, { rawTerm: term, normalizedTerm: normalized, tooShort: false });
+  }
+
+  renderSearchResults(matches, options) {
+    const container = this.elements.searchResults;
+    if (!container) return;
+    container.innerHTML = '';
+    const { rawTerm, normalizedTerm, tooShort } = options;
+    if (!rawTerm) {
+      const info = document.createElement('div');
+      info.className = 'search-empty';
+      info.textContent = '输入关键词开始查找。';
+      container.appendChild(info);
+      return;
+    }
+    if (tooShort) {
+      const info = document.createElement('div');
+      info.className = 'search-empty';
+      info.textContent = '请输入至少 2 个字符。';
+      container.appendChild(info);
+      return;
+    }
+    if (matches.length === 0) {
+      const info = document.createElement('div');
+      info.className = 'search-empty';
+      info.textContent = `未找到包含 “${rawTerm}” 的消息。`;
+      container.appendChild(info);
+      return;
+    }
+    matches.forEach((entry, index) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'search-result';
+      button.setAttribute('role', 'listitem');
+      button.dataset.messageId = entry.message.id;
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      const roleLabel = entry.message.role === 'assistant' ? 'AI' : '我';
+      meta.textContent = `${roleLabel} · ${new Date(entry.message.createdAt).toLocaleString()}`;
+      const snippetEl = document.createElement('div');
+      snippetEl.className = 'snippet';
+      const snippetText = entry.message.content || '';
+      const matchIndex = entry.index >= 0 ? entry.index : 0;
+      const radius = 60;
+      const start = Math.max(0, matchIndex - radius);
+      const end = Math.min(snippetText.length, matchIndex + normalizedTerm.length + radius);
+      let snippet = snippetText.slice(start, end);
+      const prefix = start > 0 ? '…' : '';
+      const suffix = end < snippetText.length ? '…' : '';
+      const escaped = escapeHtml(snippet);
+      const highlightRegex = new RegExp(`(${escapeRegExp(normalizedTerm)})`, 'gi');
+      const highlighted = normalizedTerm ? escaped.replace(highlightRegex, '<mark>$1</mark>') : escaped;
+      snippetEl.innerHTML = `${prefix}${highlighted}${suffix}`;
+      button.appendChild(meta);
+      button.appendChild(snippetEl);
+      button.addEventListener('click', () => {
+        this.selectSearchResult(index);
+      });
+      container.appendChild(button);
+    });
+  }
+
+  selectSearchResult(index) {
+    const target = this.searchMatches[index];
+    if (!target) {
+      return;
+    }
+    this.highlightMessage(target.id);
+    this.closeSearch();
+  }
+
+  highlightMessage(id) {
+    const element = this.findMessageElement(id);
+    if (!element) return;
+    if (this.highlightedMessageId && this.highlightedMessageId !== id) {
+      const previous = this.findMessageElement(this.highlightedMessageId);
+      previous?.classList.remove('is-highlighted');
+    }
+    element.classList.add('is-highlighted');
+    element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (this.highlightTimer) {
+      clearTimeout(this.highlightTimer);
+    }
+    this.highlightedMessageId = id;
+    this.highlightTimer = window.setTimeout(() => {
+      element.classList.remove('is-highlighted');
+      if (this.highlightedMessageId === id) {
+        this.highlightedMessageId = null;
+      }
+    }, 2200);
+  }
+
+  openPins() {
+    this.elements.pinsModal?.removeAttribute('hidden');
+    this.renderPins();
+    this.elements.pinsClose?.focus();
+  }
+
+  closePins() {
+    this.elements.pinsModal?.setAttribute('hidden', '');
+    this.elements.textarea?.focus();
+  }
+
+  loadPinnedMessages() {
+    try {
+      const raw = localStorage.getItem(PIN_STORAGE_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed
+          .filter((item) => item && typeof item.id === 'string' && typeof item.content === 'string')
+          .slice(0, MAX_PINNED);
+      }
+    } catch (error) {
+      console.warn('无法读取收藏夹', error);
+    }
+    return [];
+  }
+
+  savePinnedMessages() {
+    try {
+      localStorage.setItem(PIN_STORAGE_KEY, JSON.stringify(this.pinnedMessages.slice(0, MAX_PINNED)));
+    } catch (error) {
+      console.warn('无法保存收藏夹', error);
+    }
+  }
+
+  renderPins() {
+    const container = this.elements.pinsList;
+    if (!container) return;
+    container.innerHTML = '';
+    if (this.pinnedMessages.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'pin-empty';
+      empty.textContent = '暂无收藏，点击消息右上角的“收藏”即可保存重点内容。';
+      container.appendChild(empty);
+      if (this.elements.pinsClear) {
+        this.elements.pinsClear.disabled = true;
+      }
+      return;
+    }
+    if (this.elements.pinsClear) {
+      this.elements.pinsClear.disabled = false;
+    }
+    this.pinnedMessages.forEach((pin) => {
+      const item = document.createElement('div');
+      item.className = 'pin-item';
+      item.setAttribute('role', 'listitem');
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      const roleLabel = pin.role === 'assistant' ? 'AI' : '我';
+      meta.textContent = `${roleLabel} · ${new Date(pin.createdAt).toLocaleString()}`;
+      const snippet = document.createElement('div');
+      snippet.className = 'pin-snippet';
+      snippet.textContent = pin.content;
+      const actions = document.createElement('div');
+      actions.className = 'pin-actions';
+
+      const locateBtn = document.createElement('button');
+      locateBtn.type = 'button';
+      locateBtn.textContent = '定位';
+      locateBtn.dataset.action = 'locate';
+      locateBtn.dataset.messageId = pin.id;
+      actions.appendChild(locateBtn);
+
+      const fillBtn = document.createElement('button');
+      fillBtn.type = 'button';
+      fillBtn.textContent = '填入输入框';
+      fillBtn.dataset.action = 'fill';
+      fillBtn.dataset.messageId = pin.id;
+      actions.appendChild(fillBtn);
+
+      const copyBtn = document.createElement('button');
+      copyBtn.type = 'button';
+      copyBtn.textContent = '复制内容';
+      copyBtn.dataset.action = 'copy';
+      copyBtn.dataset.messageId = pin.id;
+      actions.appendChild(copyBtn);
+
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.textContent = '取消收藏';
+      removeBtn.dataset.action = 'remove';
+      removeBtn.dataset.messageId = pin.id;
+      actions.appendChild(removeBtn);
+
+      item.appendChild(meta);
+      item.appendChild(snippet);
+      item.appendChild(actions);
+      container.appendChild(item);
+    });
+  }
+
+  clearPins() {
+    if (this.pinnedMessages.length === 0) {
+      return;
+    }
+    this.pinnedMessages = [];
+    this.savePinnedMessages();
+    this.renderPins();
+    this.refreshPinButtons();
+    this.toasts.show({ title: '收藏夹已清空', kind: 'info' });
+  }
+
+  togglePin(id) {
+    const existingIndex = this.pinnedMessages.findIndex((item) => item.id === id);
+    if (existingIndex >= 0) {
+      this.pinnedMessages.splice(existingIndex, 1);
+      this.savePinnedMessages();
+      this.renderPins();
+      this.refreshPinButtons();
+      this.toasts.show({ title: '已取消收藏', kind: 'info', duration: 2000 });
+      return;
+    }
+    const message = this.messages.find((msg) => msg.id === id);
+    if (!message || !message.content) {
+      this.toasts.show({ title: '暂无可收藏的内容', kind: 'error', duration: 2000 });
+      return;
+    }
+    this.pinnedMessages.unshift({
+      id: message.id,
+      role: message.role,
+      content: message.content,
+      createdAt: message.createdAt,
+    });
+    if (this.pinnedMessages.length > MAX_PINNED) {
+      this.pinnedMessages = this.pinnedMessages.slice(0, MAX_PINNED);
+    }
+    this.savePinnedMessages();
+    this.renderPins();
+    this.refreshPinButtons();
+    this.toasts.show({ title: '已收藏', kind: 'success', duration: 2000 });
+  }
+
+  isPinned(id) {
+    return this.pinnedMessages.some((item) => item.id === id);
+  }
+
+  updatePinButton(button, id) {
+    const message = this.messages.find((msg) => msg.id === id);
+    const hasContent = !!(message && message.content && message.content.trim().length > 0);
+    button.textContent = this.isPinned(id) ? '取消收藏' : '收藏';
+    button.dataset.action = 'pin';
+    button.dataset.messageId = id;
+    button.disabled = !hasContent;
+  }
+
+  refreshPinButtons() {
+    const buttons = this.elements.messageList?.querySelectorAll('[data-pin-for]');
+    buttons?.forEach((button) => {
+      if (button instanceof HTMLButtonElement) {
+        const id = button.dataset.pinFor;
+        if (id) {
+          this.updatePinButton(button, id);
+        }
+      }
+    });
+  }
+
+  loadPromptHistory() {
+    try {
+      const raw = localStorage.getItem(PROMPT_HISTORY_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed.filter((item) => typeof item === 'string').slice(0, MAX_PROMPT_HISTORY);
+      }
+    } catch (error) {
+      console.warn('无法读取提示历史', error);
+    }
+    return [];
+  }
+
+  savePromptHistory() {
+    try {
+      localStorage.setItem(PROMPT_HISTORY_KEY, JSON.stringify(this.promptHistory.slice(0, MAX_PROMPT_HISTORY)));
+    } catch (error) {
+      console.warn('无法保存提示历史', error);
+    }
+  }
+
+  renderPromptHistory() {
+    const container = this.elements.promptHistory;
+    if (!container) return;
+    container.innerHTML = '';
+    if (this.promptHistory.length === 0) {
+      container.setAttribute('hidden', '');
+      return;
+    }
+    container.removeAttribute('hidden');
+    this.promptHistory.forEach((entry, index) => {
+      const chip = document.createElement('div');
+      chip.className = 'prompt-chip';
+      const fill = document.createElement('button');
+      fill.type = 'button';
+      fill.className = 'prompt-fill';
+      fill.dataset.action = 'fill';
+      fill.dataset.index = String(index);
+      fill.textContent = entry;
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'prompt-remove';
+      remove.dataset.action = 'remove';
+      remove.dataset.index = String(index);
+      remove.setAttribute('aria-label', '移除此提示');
+      remove.textContent = '×';
+      chip.appendChild(fill);
+      chip.appendChild(remove);
+      container.appendChild(chip);
+    });
+  }
+
+  recordPrompt(prompt) {
+    const value = prompt.trim();
+    if (!value) return;
+    this.promptHistory = this.promptHistory.filter((item) => item !== value);
+    this.promptHistory.unshift(value);
+    if (this.promptHistory.length > MAX_PROMPT_HISTORY) {
+      this.promptHistory = this.promptHistory.slice(0, MAX_PROMPT_HISTORY);
+    }
+    this.savePromptHistory();
+    this.renderPromptHistory();
   }
 
   /**
@@ -1034,6 +1380,11 @@ class ChatApp {
     const el = this.renderMessage(message);
     this.elements.messageList?.appendChild(el);
     el.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    if (this.elements.searchModal && !this.elements.searchModal.hasAttribute('hidden')) {
+      const value = this.elements.searchInput?.value || '';
+      this.updateSearchResults(value);
+    }
+    this.refreshPinButtons();
   }
 
   clearMessages() {
@@ -1042,6 +1393,11 @@ class ChatApp {
       this.elements.messageList.innerHTML = '';
     }
     this.renderWelcome();
+    if (this.elements.searchModal && !this.elements.searchModal.hasAttribute('hidden')) {
+      const value = this.elements.searchInput?.value || '';
+      this.updateSearchResults(value);
+    }
+    this.refreshPinButtons();
   }
 
   exportConversation() {
@@ -1062,18 +1418,6 @@ class ChatApp {
     const link = document.createElement('a');
     link.href = url;
     link.download = `gradient-chat-${Date.now()}.json`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
-  }
-
-  exportMetrics() {
-    const blob = new Blob([this.metrics.exportNDJSON()], { type: 'application/x-ndjson' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `gradient-metrics-${Date.now()}.ndjson`;
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -1112,9 +1456,9 @@ class ChatApp {
     contentEl.textContent = message.content;
     bubble.appendChild(contentEl);
 
+    const actions = document.createElement('div');
+    actions.className = 'actions';
     if (message.role === 'assistant') {
-      const actions = document.createElement('div');
-      actions.className = 'actions';
       const retryBtn = document.createElement('button');
       retryBtn.type = 'button';
       retryBtn.textContent = '立即重试';
@@ -1124,6 +1468,10 @@ class ChatApp {
       copyBtn.type = 'button';
       copyBtn.textContent = '复制';
       copyBtn.addEventListener('click', async () => {
+        if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
+          this.toasts.show({ title: '当前环境不支持复制', kind: 'error' });
+          return;
+        }
         try {
           await navigator.clipboard.writeText(message.content);
           this.toasts.show({ title: '已复制到剪贴板', kind: 'success', duration: 2000 });
@@ -1132,8 +1480,14 @@ class ChatApp {
         }
       });
       actions.appendChild(copyBtn);
-      bubble.appendChild(actions);
     }
+    const pinBtn = document.createElement('button');
+    pinBtn.type = 'button';
+    pinBtn.dataset.pinFor = message.id;
+    pinBtn.addEventListener('click', () => this.togglePin(message.id));
+    actions.appendChild(pinBtn);
+    this.updatePinButton(pinBtn, message.id);
+    bubble.appendChild(actions);
     const meta = document.createElement('div');
     meta.className = 'meta';
     this.updateMeta(meta, message);
@@ -1208,6 +1562,7 @@ class ChatApp {
       createdAt: Date.now(),
     };
     this.addMessage(userMessage);
+    this.recordPrompt(content);
     this.scheduleAssistantReply();
   }
 
@@ -1261,11 +1616,9 @@ class ChatApp {
           },
           onUsage: (usage) => {
             this.setUsage(assistantId, usage);
-            this.refreshMetrics();
           },
           onFinish: ({ finishReason, requestId }) => {
             this.setFinish(assistantId, finishReason, requestId);
-            this.refreshMetrics();
           },
           onRetry: ({ delay, status, resume }) => {
             this.toasts.show({
@@ -1316,14 +1669,10 @@ class ChatApp {
           this.toasts.show({ title: '生成已取消', kind: 'info', duration: 2000 });
         } else if (error instanceof ApiError) {
           this.updateAssistantStatus(assistantId, 'error', error.message);
-          this.metrics.recordFailure(String(error.status));
-          this.refreshMetrics();
           this.toasts.show({ title: '请求失败', message: error.message, kind: 'error' });
         } else {
           console.error(error);
           this.updateAssistantStatus(assistantId, 'error', '未知错误');
-          this.metrics.recordFailure('unknown');
-          this.refreshMetrics();
           this.toasts.show({ title: '未知错误', kind: 'error' });
         }
       } finally {
@@ -1378,6 +1727,11 @@ class ChatApp {
         this.updateMeta(meta, message);
       }
       element.scrollIntoView({ behavior: 'smooth', block: 'end' });
+      if (this.elements.searchModal && !this.elements.searchModal.hasAttribute('hidden')) {
+        const value = this.elements.searchInput?.value || '';
+        this.updateSearchResults(value);
+      }
+      this.refreshPinButtons();
     }
   }
 
@@ -1451,45 +1805,6 @@ class ChatApp {
       }
     }
     this.elements.cancelBtn.disabled = this.activeControllers.size === 0;
-  }
-
-  updateMetricsToggleLabel() {
-    const toggle = this.elements.metricsToggle;
-    const panel = this.elements.metricsPanel;
-    if (!toggle || !panel) return;
-    const collapsed = panel.classList.contains('collapsed');
-    toggle.textContent = collapsed ? '展开监控' : '折叠监控';
-    toggle.setAttribute('aria-expanded', String(!collapsed));
-  }
-
-  refreshMetrics() {
-    const totals = this.metrics.getTokenTotals();
-    if (this.elements.metricPrompt) this.elements.metricPrompt.textContent = String(totals.prompt);
-    if (this.elements.metricCompletion) this.elements.metricCompletion.textContent = String(totals.completion);
-    if (this.elements.metricTotal) this.elements.metricTotal.textContent = String(totals.total);
-    if (this.elements.metricTTFTList) this.elements.metricTTFTList.textContent = this.metrics
-      .getTTFTList()
-      .slice(-10)
-      .join(', ') || '-';
-    const p95 = this.metrics.getTTFTP95();
-    if (this.elements.metricTTFTP95) this.elements.metricTTFTP95.textContent = p95 != null ? String(p95) : '-';
-    if (this.elements.metric429) this.elements.metric429.textContent = String(this.metrics.getRecent429());
-    if (this.elements.metricRetries) this.elements.metricRetries.textContent = String(this.metrics.getRecentRetries());
-    if (this.elements.metricFailures) {
-      const failures = this.metrics.getFailureList();
-      this.elements.metricFailures.innerHTML = '';
-      if (failures.length === 0) {
-        const li = document.createElement('li');
-        li.textContent = '无记录';
-        this.elements.metricFailures.appendChild(li);
-      } else {
-        failures.forEach((failure) => {
-          const li = document.createElement('li');
-          li.textContent = `${failure.kind}: ${failure.count}`;
-          this.elements.metricFailures.appendChild(li);
-        });
-      }
-    }
   }
 
   openSettings() {
@@ -1611,12 +1926,6 @@ function runSelfTests() {
   assert(collected[0] === 'hello', 'SSE 第一个事件为 hello');
   results.push('SseParser ok');
 
-  const metrics = new Metrics();
-  [10, 20, 30, 40, 50].forEach((value) => metrics.recordTTFT(value));
-  const p95 = metrics.getTTFTP95();
-  assert(p95 != null && p95 >= 10 && p95 <= 50, 'TTFT p95 范围正确');
-  results.push('Metrics ok');
-
   console.info('自测通过:', results.join(', '));
 }
 
@@ -1628,8 +1937,7 @@ if (!toastContainer) {
 }
 const toasts = new Toasts(toastContainer);
 const store = new Store();
-const metrics = new Metrics();
-const api = new ApiClient(store, metrics);
-const app = new ChatApp(store, api, metrics, toasts);
+const api = new ApiClient(store);
+const app = new ChatApp(store, api, toasts);
 app.init();
 
